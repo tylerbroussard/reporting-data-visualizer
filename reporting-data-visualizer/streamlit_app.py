@@ -2,205 +2,274 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
 import numpy as np
+from scipy import stats
 from datetime import datetime
 
-def calculate_performance_metrics(df):
-    """Calculate key performance metrics for each agent"""
-    metrics_df = df.copy()
-    
-    # Efficiency metrics
-    metrics_df['short_call_ratio'] = metrics_df['SHORT CALLS count'] / metrics_df['CALLS count']
-    metrics_df['transfer_rate'] = metrics_df['TRANSFERS TO SAME QUEUE count'] / metrics_df['CALLS count']
-    metrics_df['disconnect_rate'] = metrics_df['AGENT DISCONNECTS FIRST count'] / metrics_df['CALLS count']
-    metrics_df['hold_rate'] = metrics_df['LONG HOLDS count'] / metrics_df['CALLS count']
-    
-    return metrics_df
+def detect_time_columns(df):
+    """Detect and convert time format columns"""
+    time_columns = []
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            if df[col].str.contains(':', na=False).any():
+                try:
+                    df[f'{col}_seconds'] = pd.to_timedelta(df[col]).dt.total_seconds()
+                    time_columns.append(col)
+                except:
+                    pass
+    return time_columns
 
-def generate_insights(df):
-    """Generate actionable insights from the data"""
+def analyze_column_types(df):
+    """Enhanced column type analysis"""
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+    categorical_cols = df.select_dtypes(include=['object']).columns
+    time_cols = detect_time_columns(df)
+    
+    # Identify potential ID columns
+    id_cols = [col for col in df.columns if 'id' in col.lower() or 'number' in col.lower()]
+    
+    # Identify name-related columns
+    name_cols = [col for col in df.columns if 'name' in col.lower() or 'agent' in col.lower()]
+    
+    return {
+        'numeric': [col for col in numeric_cols if not col.endswith('_seconds') and col not in id_cols],
+        'categorical': [col for col in categorical_cols if col not in time_cols and col not in name_cols],
+        'time': time_cols,
+        'id': id_cols,
+        'name': name_cols
+    }
+
+def calculate_statistical_metrics(df, column_types):
+    """Calculate advanced statistical metrics"""
+    stats_metrics = {}
+    
+    for col in column_types['numeric']:
+        stats_metrics[col] = {
+            'mean': df[col].mean(),
+            'median': df[col].median(),
+            'std': df[col].std(),
+            'skewness': stats.skew(df[col].dropna()),
+            'kurtosis': stats.kurtosis(df[col].dropna()),
+            'iqr': df[col].quantile(0.75) - df[col].quantile(0.25)
+        }
+    
+    return stats_metrics
+
+def analyze_correlations(df, column_types):
+    """Analyze correlations between numeric columns"""
+    numeric_cols = column_types['numeric'] + [col for col in df.columns if col.endswith('_seconds')]
+    if len(numeric_cols) > 1:
+        return df[numeric_cols].corr()
+    return None
+
+def generate_enhanced_insights(df, column_types, stats_metrics):
+    """Generate comprehensive insights from the data"""
     insights = []
     
-    # Identify top performers
-    top_agents = df.nlargest(3, 'CALLS count')
-    insights.append({
-        'category': 'Top Performers',
-        'finding': f"Top performing agents by call volume: {', '.join(top_agents['AGENT'].tolist())}",
-        'action': "Consider having these agents mentor others or document their best practices"
-    })
+    # Performance Analysis
+    for col in column_types['numeric']:
+        # Distribution Analysis
+        stats_data = stats_metrics[col]
+        skewness = stats_data['skewness']
+        
+        if abs(skewness) > 1:
+            insights.append({
+                'category': 'Distribution Pattern',
+                'finding': f"{col} shows {'positive' if skewness > 0 else 'negative'} skewness",
+                'metric': f"Skewness: {skewness:.2f}",
+                'action': "Consider investigating the cause of data asymmetry"
+            })
+        
+        # Outlier Detection
+        z_scores = np.abs(stats.zscore(df[col].dropna()))
+        outliers = df[z_scores > 3]
+        if not outliers.empty:
+            insights.append({
+                'category': 'Outlier Detection',
+                'finding': f"Found {len(outliers)} significant outliers in {col}",
+                'metric': f"Outside 3 standard deviations",
+                'action': "Review these cases for potential special handling"
+            })
     
-    # Identify high transfer rates
-    high_transfer_agents = df[df['transfer_rate'] > df['transfer_rate'].mean() + df['transfer_rate'].std()]
-    if not high_transfer_agents.empty:
-        insights.append({
-            'category': 'Training Needs',
-            'finding': f"{len(high_transfer_agents)} agents have above-average transfer rates",
-            'action': "Review call routing and provide additional product/service training"
-        })
+    # Time Analysis
+    for col in column_types['time']:
+        seconds_col = f'{col}_seconds'
+        if seconds_col in df.columns:
+            percentile_95 = np.percentile(df[seconds_col], 95)
+            insights.append({
+                'category': 'Time Analysis',
+                'finding': f"95% of {col} are below {int(percentile_95/60):02d}:{int(percentile_95%60):02d}",
+                'metric': f"95th percentile",
+                'action': "Consider this as a baseline for performance targets"
+            })
     
-    # Analyze hold patterns
-    high_hold_agents = df[df['hold_rate'] > df['hold_rate'].mean() + df['hold_rate'].std()]
-    if not high_hold_agents.empty:
-        insights.append({
-            'category': 'Efficiency',
-            'finding': f"{len(high_hold_agents)} agents show excessive hold times",
-            'action': "Review knowledge base access and tools efficiency"
-        })
+    # Categorical Analysis
+    for cat_col in column_types['categorical']:
+        if len(df[cat_col].unique()) < 50:
+            value_counts = df[cat_col].value_counts()
+            entropy = stats.entropy(value_counts)
+            insights.append({
+                'category': 'Category Distribution',
+                'finding': f"Distribution entropy for {cat_col}: {entropy:.2f}",
+                'metric': "Distribution evenness",
+                'action': "Higher entropy suggests more even distribution"
+            })
     
     return insights
 
+def create_enhanced_visualizations(df, column_types, corr_matrix):
+    """Create comprehensive visualizations"""
+    figures = []
+    
+    # Enhanced distribution analysis
+    for col in column_types['numeric']:
+        # Violin plot with box plot overlay
+        fig = go.Figure()
+        fig.add_trace(go.Violin(
+            y=df[col],
+            box_visible=True,
+            line_color='blue',
+            meanline_visible=True,
+            fillcolor='lightblue',
+            opacity=0.6,
+            name=col
+        ))
+        fig.update_layout(title=f'Distribution Analysis of {col}')
+        figures.append(('distribution', fig))
+        
+        # QQ Plot for normality check
+        qq_fig = px.scatter(
+            x=stats.probplot(df[col].dropna(), dist="norm")[0][0],
+            y=stats.probplot(df[col].dropna(), dist="norm")[0][1],
+            title=f'Q-Q Plot of {col}'
+        )
+        qq_fig.add_trace(
+            go.Scatter(
+                x=stats.probplot(df[col].dropna(), dist="norm")[0][0],
+                y=stats.probplot(df[col].dropna(), dist="norm")[0][0],
+                mode='lines',
+                name='Normal'
+            )
+        )
+        figures.append(('qq_plot', qq_fig))
+    
+    # Time analysis visualizations
+    for col in column_types['time']:
+        seconds_col = f'{col}_seconds'
+        if seconds_col in df.columns:
+            # Density heatmap by category
+            for cat_col in column_types['categorical']:
+                if len(df[cat_col].unique()) < 10:
+                    fig = px.density_heatmap(
+                        df,
+                        x=cat_col,
+                        y=seconds_col,
+                        title=f'{col} Distribution by {cat_col}'
+                    )
+                    figures.append(('time_heatmap', fig))
+    
+    # Correlation heatmap
+    if corr_matrix is not None and not corr_matrix.empty:
+        fig = px.imshow(
+            corr_matrix,
+            title='Correlation Matrix',
+            color_continuous_scale='RdBu',
+            aspect='auto'
+        )
+        figures.append(('correlation', fig))
+    
+    # Categorical analysis
+    for cat_col in column_types['categorical']:
+        if len(df[cat_col].unique()) < 50:
+            # Sunburst chart for hierarchical view
+            for num_col in column_types['numeric']:
+                fig = px.sunburst(
+                    df,
+                    path=[cat_col],
+                    values=num_col,
+                    title=f'Hierarchical View of {num_col} by {cat_col}'
+                )
+                figures.append(('sunburst', fig))
+    
+    return figures
+
 def main():
     st.set_page_config(layout="wide")
-    st.title("Agent Productivity Analysis & Insights")
+    st.title("Enhanced CSV Analysis Dashboard")
     
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    uploaded_file = st.file_uploader("Upload any CSV file", type="csv")
     
     if uploaded_file is not None:
         try:
-            # Read and process data
+            # Read data
             df = pd.read_csv(uploaded_file)
-            metrics_df = calculate_performance_metrics(df)
+            
+            # Analyze column types
+            column_types = analyze_column_types(df)
+            
+            # Calculate statistical metrics
+            stats_metrics = calculate_statistical_metrics(df, column_types)
+            
+            # Calculate correlations
+            corr_matrix = analyze_correlations(df, column_types)
             
             # Sidebar filters
             st.sidebar.header("Filters")
-            selected_agent_group = st.sidebar.multiselect(
-                "Select Agent Group",
-                options=df['AGENT GROUP'].unique(),
-                default=df['AGENT GROUP'].unique()
-            )
+            for cat_col in column_types['categorical']:
+                if len(df[cat_col].unique()) < 50:
+                    selected_values = st.sidebar.multiselect(
+                        f"Select {cat_col}",
+                        options=sorted(df[cat_col].unique()),
+                        default=sorted(df[cat_col].unique())
+                    )
+                    df = df[df[cat_col].isin(selected_values)]
             
-            # Filter data
-            filtered_df = metrics_df[metrics_df['AGENT GROUP'].isin(selected_agent_group)]
+            # Generate insights
+            insights = generate_enhanced_insights(df, column_types, stats_metrics)
             
-            # Layout in tabs
+            # Create tabs
             tab1, tab2, tab3, tab4 = st.tabs([
-                "Performance Overview", 
-                "Agent Analysis",
-                "Efficiency Metrics",
-                "Actionable Insights"
+                "Summary & Insights",
+                "Statistical Analysis",
+                "Visualizations",
+                "Data Overview"
             ])
             
             with tab1:
-                st.header("Performance Overview")
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric(
-                        "Total Calls Handled",
-                        f"{filtered_df['CALLS count'].sum():,}",
-                        delta=None
-                    )
-                with col2:
-                    avg_transfer_rate = filtered_df['transfer_rate'].mean()
-                    st.metric(
-                        "Avg Transfer Rate",
-                        f"{avg_transfer_rate:.1%}",
-                        delta=None
-                    )
-                with col3:
-                    efficiency_rate = 1 - filtered_df['short_call_ratio'].mean()
-                    st.metric(
-                        "Call Efficiency Rate",
-                        f"{efficiency_rate:.1%}",
-                        delta=None
-                    )
-                with col4:
-                    hold_rate = filtered_df['hold_rate'].mean()
-                    st.metric(
-                        "Hold Rate",
-                        f"{hold_rate:.1%}",
-                        delta=None
-                    )
-                
-                # Performance distribution
-                fig_dist = px.histogram(
-                    filtered_df,
-                    x='CALLS count',
-                    nbins=20,
-                    title='Distribution of Call Volumes'
-                )
-                st.plotly_chart(fig_dist, use_container_width=True)
+                st.header("Key Insights")
+                for insight in insights:
+                    with st.expander(f"{insight['category']}"):
+                        st.write("**Finding:**", insight['finding'])
+                        st.write("**Metric:**", insight['metric'])
+                        st.write("**Recommended Action:**", insight['action'])
             
             with tab2:
-                st.header("Agent Performance Analysis")
+                st.header("Statistical Analysis")
                 
-                # Top performers chart
-                fig_top = px.bar(
-                    filtered_df.nlargest(10, 'CALLS count'),
-                    x='AGENT',
-                    y=['CALLS count', 'LONG CALLS count', 'SHORT CALLS count'],
-                    title='Top 10 Agents by Call Volume',
-                    barmode='group'
-                )
-                st.plotly_chart(fig_top, use_container_width=True)
+                # Display statistical metrics
+                for col, metrics in stats_metrics.items():
+                    with st.expander(f"Statistics for {col}"):
+                        for metric, value in metrics.items():
+                            st.write(f"**{metric.title()}:** {value:.2f}")
                 
-                # Scatter plot of efficiency vs volume
-                fig_scatter = px.scatter(
-                    filtered_df,
-                    x='CALLS count',
-                    y='short_call_ratio',
-                    color='AGENT GROUP',
-                    hover_data=['AGENT'],
-                    title='Efficiency vs Call Volume'
-                )
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                # Display correlation matrix if available
+                if corr_matrix is not None:
+                    st.write("### Correlation Matrix")
+                    st.dataframe(corr_matrix.style.background_gradient(cmap='RdBu'))
             
             with tab3:
-                st.header("Efficiency Metrics")
+                st.header("Advanced Visualizations")
+                figures = create_enhanced_visualizations(df, column_types, corr_matrix)
                 
-                # Heatmap of key metrics
-                metrics_to_plot = ['transfer_rate', 'hold_rate', 'disconnect_rate']
-                top_agents_df = filtered_df.nlargest(15, 'CALLS count')
-                
-                fig_heatmap = go.Figure(data=go.Heatmap(
-                    z=top_agents_df[metrics_to_plot].values,
-                    x=metrics_to_plot,
-                    y=top_agents_df['AGENT'],
-                    colorscale='RdYlBu_r'
-                ))
-                fig_heatmap.update_layout(title='Efficiency Metrics Heatmap (Top 15 Agents)')
-                st.plotly_chart(fig_heatmap, use_container_width=True)
-                
-                # Group performance comparison
-                fig_box = px.box(
-                    filtered_df,
-                    x='AGENT GROUP',
-                    y='CALLS count',
-                    title='Call Volume Distribution by Agent Group'
-                )
-                st.plotly_chart(fig_box, use_container_width=True)
+                for viz_type, fig in figures:
+                    st.plotly_chart(fig, use_container_width=True)
             
             with tab4:
-                st.header("Actionable Insights")
-                insights = generate_insights(filtered_df)
-                
-                for insight in insights:
-                    with st.expander(f"{insight['category']} Insight"):
-                        st.write("**Finding:**", insight['finding'])
-                        st.write("**Recommended Action:**", insight['action'])
-                
-                # Performance improvement opportunities
-                st.subheader("Performance Improvement Opportunities")
-                improvement_df = filtered_df[
-                    (filtered_df['transfer_rate'] > filtered_df['transfer_rate'].mean()) |
-                    (filtered_df['hold_rate'] > filtered_df['hold_rate'].mean())
-                ]
-                
-                if not improvement_df.empty:
-                    st.dataframe(
-                        improvement_df[[
-                            'AGENT',
-                            'AGENT GROUP',
-                            'CALLS count',
-                            'transfer_rate',
-                            'hold_rate',
-                            'disconnect_rate'
-                        ]].style.format({
-                            'transfer_rate': '{:.1%}',
-                            'hold_rate': '{:.1%}',
-                            'disconnect_rate': '{:.1%}'
-                        })
-                    )
+                st.header("Data Overview")
+                st.write("Dataset Shape:", df.shape)
+                st.write("Column Types:", column_types)
+                st.dataframe(df)
                 
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
