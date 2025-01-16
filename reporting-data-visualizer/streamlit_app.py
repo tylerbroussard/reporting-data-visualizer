@@ -283,7 +283,14 @@ def main():
                 # Display correlation matrix if available
                 if corr_matrix is not None:
                     st.write("### Correlation Matrix")
-                    st.dataframe(corr_matrix.style.background_gradient(cmap='RdBu'))
+                    # Create a heatmap using plotly instead of pandas styling
+                    fig = px.imshow(
+                        corr_matrix,
+                        color_continuous_scale='RdBu',
+                        aspect='auto',
+                        title='Correlation Matrix'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
             
             with tab3:
                 st.header("Visualizations")
